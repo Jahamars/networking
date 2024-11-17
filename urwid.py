@@ -2,15 +2,28 @@ import os
 import subprocess
 import sys
 import re
-import urwid
 
 CONFIG_FILE_PATH = "/etc/network/interfaces"
-BACKUP_FILE_PATH = "/etc/network/interfaces.back"
+
+# Цвета для вывода текста
+class Color:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
 
 def require_root():
     if os.geteuid() != 0:
-        print("Эта программа должна быть запущена от имени root.")
+        print(f"{Color.FAIL}Эта программа должна быть запущена от имени root.{Color.ENDC}")
         sys.exit(1)
+
+def get_user_input(prompt):
+    return input(f"{Color.OKCYAN}{prompt}{Color.ENDC}")
 
 def get_wireless_interfaces():
     result = subprocess.run(["iwconfig"], capture_output=True, text=True).stdout
@@ -22,13 +35,28 @@ def scan_wifi_networks(interface):
     networks = re.findall(r"ESSID:\"([^\"]+)\"", result)
     return list(set(networks))  # Убираем дубликаты
 
-def create_network_config(device, ssid, password):
-    # Создание резервной копии файла конфигурации
-    if os.path.exists(CONFIG_FILE_PATH):
-        os.rename(CONFIG_FILE_PATH, BACKUP_FILE_PATH)
+def show_current_config():
+    print(f"\n{Color.HEADER}=== Текущая конфигурация сетевого интерфейса ==={Color.ENDC}\n")
+    try:
+        with open(CONFIG_FILE_PATH, 'r') as file:
+            print(f"{Color.OKGREEN}{file.read()}{Color.ENDC}")
+    except FileNotFoundError:
+        print(f"{Color.FAIL}Файл конфигурации {CONFIG_FILE_PATH} не найден.{Color.ENDC}")
+    except PermissionError:
+        print(f"{Color.FAIL}Нет доступа к файлу {CONFIG_FILE_PATH}.{Color.ENDC}")
 
-    # Создание нового файла interfaces с обновленными настройками
-    new_content = f"""
+def update_network_config(device, ssid, password):
+    with open(CONFIG_FILE_PATH, 'r') as file:
+        lines = file.readlines()
+
+    new_content = ""
+    for line in lines:
+        if line.strip() and not line.startswith("#"):
+            new_content += f"# {line}"
+        else:
+            new_content += line
+
+    new_content += f"""
 # Автоматически добавлено конфигуратором WiFi
 auto lo
 iface lo inet loopback
@@ -43,69 +71,62 @@ iface {device} inet dhcp
     with open(CONFIG_FILE_PATH, 'w') as file:
         file.write(new_content)
 
-    # Создание дополнительного файла с информацией о сети и пароле
-    with open(f"/etc/network/{ssid}_credentials", 'w') as cred_file:
-        cred_file.write(f"SSID: {ssid}\nPassword: {password}\n")
+    print(f"{Color.OKGREEN}Конфигурация обновлена успешно.{Color.ENDC}")
 
 def restart_networking():
     try:
         subprocess.run(["systemctl", "restart", "networking"], check=True)
-        print("Служба networking успешно перезапущена.")
+        print(f"{Color.OKGREEN}Служба networking успешно перезапущена.{Color.ENDC}")
     except subprocess.CalledProcessError:
-        print("Не удалось перезапустить службу networking. Проверьте права доступа.")
+        print(f"{Color.FAIL}Не удалось перезапустить службу networking. Проверьте права доступа.{Color.ENDC}")
 
-# Интерфейс с использованием urwid
-def main_menu(interfaces):
-    body = [urwid.Text("Выберите беспроводной интерфейс:"), urwid.Divider()]
-    options = []
+def main():
+    require_root()
+    print(f"{Color.BOLD}=== Конфигуратор WiFi ==={Color.ENDC}")
+    choice = get_user_input("Выберите действие:\n1. Показать текущие настройки\n2. Изменить настройки соединения\nВаш выбор: ")
 
-    for interface in interfaces:
-        button = urwid.Button(interface)
-        urwid.connect_signal(button, 'click', select_interface, interface)
-        options.append(urwid.AttrMap(button, None, focus_map='reversed'))
-    
-    body.extend(options)
-    return urwid.ListBox(urwid.SimpleFocusListWalker(body))
+    if choice == '1':
+        show_current_config()
+    elif choice == '2':
+        interfaces = get_wireless_interfaces()
+        if not interfaces:
+            print(f"{Color.WARNING}Беспроводные интерфейсы не найдены.{Color.ENDC}")
+            return
 
-def select_interface(button, interface):
-    networks = scan_wifi_networks(interface)
-    if not networks:
-        main.original_widget = urwid.Text("Wi-Fi сети не найдены. Вернитесь и выберите другой интерфейс.")
-    else:
-        main.original_widget = network_menu(interface, networks)
+        print(f"\n{Color.HEADER}Доступные беспроводные интерфейсы:{Color.ENDC}")
+        for idx, interface in enumerate(interfaces, start=1):
+            print(f"{Color.OKBLUE}{idx}. {interface}{Color.ENDC}")
 
-def network_menu(interface, networks):
-    body = [urwid.Text(f"Доступные Wi-Fi сети для {interface}:"), urwid.Divider()]
-    options = []
+        try:
+            interface_idx = int(get_user_input("Выберите интерфейс (введите номер): ")) - 1
+            device = interfaces[interface_idx]
+        except (ValueError, IndexError):
+            print(f"{Color.FAIL}Неверный выбор. Попробуйте снова.{Color.ENDC}")
+            return
 
-    for ssid in networks:
-        button = urwid.Button(ssid)
-        urwid.connect_signal(button, 'click', select_network, (interface, ssid))
-        options.append(urwid.AttrMap(button, None, focus_map='reversed'))
+        networks = scan_wifi_networks(device)
+        if not networks:
+            print(f"{Color.WARNING}Wi-Fi сети не найдены.{Color.ENDC}")
+            return
 
-    body.extend(options)
-    return urwid.ListBox(urwid.SimpleFocusListWalker(body))
+        print(f"\n{Color.HEADER}Доступные Wi-Fi сети:{Color.ENDC}")
+        for idx, network in enumerate(networks, start=1):
+            print(f"{Color.OKBLUE}{idx}. {network}{Color.ENDC}")
 
-def select_network(button, data):
-    interface, ssid = data
-    password_edit = urwid.Edit("Введите пароль сети (PSK): ")
+        try:
+            network_idx = int(get_user_input("Выберите сеть (введите номер): ")) - 1
+            ssid = networks[network_idx]
+        except (ValueError, IndexError):
+            print(f"{Color.FAIL}Неверный выбор сети. Попробуйте снова.{Color.ENDC}")
+            return
 
-    def save_password(button):
-        password = password_edit.edit_text
-        create_network_config(interface, ssid, password)
+        password = get_user_input("Введите пароль сети (PSK): ")
+
+        update_network_config(device, ssid, password)
         restart_networking()
-        main.original_widget = urwid.Text("Конфигурация обновлена и служба networking перезапущена.")
+    else:
+        print(f"{Color.FAIL}Неверный выбор. Попробуйте снова.{Color.ENDC}")
 
-    save_button = urwid.Button("Сохранить")
-    urwid.connect_signal(save_button, 'click', save_password)
+if __name__ == "__main__":
+    main()
 
-    main.original_widget = urwid.Pile([password_edit, save_button])
-
-require_root()
-interfaces = get_wireless_interfaces()
-if not interfaces:
-    print("Беспроводные интерфейсы не найдены.")
-else:
-    main = urwid.Padding(main_menu(interfaces), left=2, right=2)
-    top = urwid.Overlay(main, urwid.SolidFill(), align='center', width=('relative', 80), valign='middle', height=('relative', 80))
-    urwid.MainLoop(top, palette=[('reversed', 'standout', '')]).run()
